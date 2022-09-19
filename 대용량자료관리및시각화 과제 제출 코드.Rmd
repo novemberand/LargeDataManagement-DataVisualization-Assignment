@@ -1,0 +1,1546 @@
+---
+title: "다람쥐버스 신규 노선 제안"
+author: |
+  | 2018310082 이지연
+  | 대용량자료관리 및 시각화 
+  | 최종 보고서 
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+### **목차**
+
+1. 주제 선정 배경 및 분석 개요
+    - 주제 선정 배경 및 분석 목표
+    - 분석 개요 
+
+2. 데이터 수집 및 전처리
+    - 버스 데이터 : 승하차 인원정보, 좌표 정보
+    - 지하철 데이터 : 승하차 인원정보, 좌표 정보
+    - 인구 데이터 : 생활인구, 사업체 및 종사자 수 통계
+    - 행정동별 데이터셋 형성
+    - 행정동 경계 데이터와 병합 
+    
+
+3. 데이터 탐색 (EDA)
+    - 다람쥐버스 현황
+    - 출근 시간대 버스 승하차 수요 시각화
+    - 출근 시간대 지하철 승하차 수요 시각화
+    - 사업체 및 종사자 밀집 지역 시각화
+    - 승하차 상위 정거장 및 지하철역 지도 시각화 
+    - 상관분석 
+
+4. 행정동 선정과 버스 노선 제안
+    - 회귀분석: 유의한 변수 탐색
+    - 클러스터링: 승하차 수요 정거장 탐색
+    - 최소신장 알고리즘: 버스 노선 제안
+
+5. 결론
+    - 최종 선정 노선 
+    - 한계와 의의
+    
+
+### **1. 주제선정 및 배경**
+#### **주제 선정 배경 및 분석 목표**
+
+> '다람쥐버스'란 다람쥐가 쳇바퀴를 돌듯이 짧은 구간을 반복 운행하는 버스로 
+> 오전 7~9시 버스 혼잡이 극심한 구간에서 운행하는 버스입니다.
+
+지하철 역과의 연결성, 통근 종착지인 사업체 밀집지역으로의 연결성을 고려하여 기존 노선 혼잡도를 완화시키는 선순환 효과를 가져오고 있습니다. 실제로 출근 시간대 다람쥐 버스의 효과가 크다고 파악하여 데이터 분석을 통해 다람쥐버스의 수요가 높을 곳을 선정해 신규 노선을 제안하고자 합니다. 
+
+####  **분석 개요**
+
+  - 서울시 버스 승하차 인원 정보 수집 및 다람쥐 버스의 현황 분석
+  - 버스 승하차 수요에 영향을 주는 변수 데이터 수집 및 행정동별 데이터셋 생성
+  - 수집한 데이터를 지도로 시각화 및 버스 수요가 높을 곳을 시각적으로 파악
+  - 회귀분석을 통해 버스 수요에 영향을 미치는 변수 파악
+  - 버스 수요가 높은 행정동 탐색 및 정거장 클러스터링
+  - 수요가 높은 정거장 선정 및 신규 노선 제안 
+
+### **2. 데이터 수집 및 전처리**
+
+사용한 데이터는 서울시 `버스 데이터`, `지하철 데이터`, `인구 데이터`와 `행정구역 데이터`로 구분하여 수집하였으며, 분석 대상 기간은 코로나19 확산 이후의 상황의 통일성 및 분석의 편의를 위하여  2020년 1년간의 데이터로 통일하였습니다.  
+
+```{r}
+# library
+suppressMessages(library(tidyverse))
+suppressMessages(library(magrittr))
+suppressMessages(library(data.table))
+suppressMessages(library(lubridate))
+suppressMessages(library(gridExtra))
+suppressMessages(library(ggpubr))
+suppressMessages(library(ggrepel))
+suppressMessages(library(ggmap))
+suppressMessages(library(httr))
+suppressMessages(library(jsonlite))
+
+```
+
+```{r include=FALSE}
+# API key 
+KAKAO_MAP_API_KEY = "d875a2e883d7b7b3ada81d4f9633b852"
+register_google(key = "AIzaSyCMTx4XxAlGhGKDHfKruXuCi5yVAaztd9I")
+```
+
+
+#### **1. 버스 데이터**
+
+- **버스 승하차 인원 정보 데이터**
+
+2020년_버스노선별_정류장별_시간대별_승하차_인원_정보  : 서울 열린데이터 광장
+  http://data.seoul.go.kr/dataList/OA-12913/S/1/datasetView.do
+
+```{r warning=FALSE}
+# raw data가 중간에 노선ID 열 하나가 삭제되고 밀림.
+# 따라서 노선 ID가 존재하는 행 번호까지 읽어오고 노선 ID 열을 제거한 뒤 이후의 행과 이어 붙임
+bus1 <- fread("data/2020년_버스노선별_정류장별_시간대별_승하차_인원_정보.csv",
+              header=TRUE) %>% select(-노선ID)
+bus2 <- fread("data/2020년_버스노선별_정류장별_시간대별_승하차_인원_정보.csv", 
+              header=TRUE, skip = 117131)
+bus <- rbind(bus1, bus2)
+rm(bus1, bus2)
+
+# 사용년월 열에서 월 변수만 분리해서 저장  
+# 정류장좌표데이터셋과 열이름 통일 및 가독성 위해 열 이름 변경 
+# 서울 버스 정류장 ARS ID는 1001~25999- 필터링해서 서울권 외의 정거장 제거 
+# 출근시간대 07시~09시 승하차 인원 정보만 선택
+bus <- bus %>% 
+  rename("ARS-ID" = "버스정류장ARS번호",
+         "7시승차"="7시승차총승객수", "7시하차"="7시하차총승객수",
+         "8시승차"="8시승차총승객수", "8시하차"="8시하차총승객수") %>%
+  mutate(month = str_sub(사용년월, 5,6) %>% as.numeric(),
+         `ARS-ID` = as.numeric(`ARS-ID`)) %>% 
+  filter(`ARS-ID` >= 1001 & `ARS-ID` <= 25999) %>% 
+  select(month, 노선번호, 노선명, `ARS-ID`, 역명,
+         `7시승차`, `7시하차`, `8시승차`, `8시하차`) %>% 
+  mutate_at(vars( `7시승차`, `7시하차`, `8시승차`, `8시하차`), as.numeric)
+```
+
+- **버스정거장 위치정보 데이터**
+
+서울시버스정류장 좌표 데이터 (2021.01.14) : 서울 열린데이터 광장
+  http://data.seoul.go.kr/dataList/OA-15067/S/1/datasetView.do
+
+```{r warning=FALSE}
+bus_address <- fread("data/서울시버스정류소좌표데이터(2021.01.14.).csv",
+                     header=TRUE,
+                     data.table = FALSE)
+bus_address %>% head()
+
+# 카카오 API 행정동 검색 ----
+address_list <- bus_address %>% select(X좌표, Y좌표)
+
+for(i in 1:nrow(bus_address)){
+  kpmg_res <- GET(
+    url = paste0('https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x=',
+                 address_list[i,1],'&y=',address_list[i,2]),
+    add_headers(Authorization = paste0("KakaoAK ", KAKAO_MAP_API_KEY)))
+  
+  kpmg_list <- kpmg_res %>% content(as = 'text') %>% fromJSON()
+  
+  
+  bus_address[i, "자치구"] <- kpmg_list$documents[2,]$region_2depth_name
+  bus_address[i, "행정동"] <- kpmg_list$documents[2,]$region_3depth_name
+  #print(i)
+}
+
+# 서울시 외 지역 제외 ----
+seoul_gu <- c("종로구", "중구", "용산구", "성동구", "광진구", "동대문구", "중랑구", "성북구", "강북구", "도봉구", "노원구", "은평구", "서대문구", "마포구", "양천구", "강서구", "구로구", "금천구", '영등포구', "동작구", "관악구", "서초구", "강남구", "송파구", "강동구")
+bus_address <- bus_address %>% filter(자치구 %in% seoul_gu)
+
+# 버스 정류장 위치 정보 병합----
+bus$`ARS-ID` <- as.numeric(bus$`ARS-ID`)
+bus <- left_join(bus, bus_address %>% select(-표준ID), by="ARS-ID") %>%
+  drop_na() %>% as.data.frame()
+
+# tidy data ----
+tidy_bus <- bus %>% 
+  select(month, 노선번호, `ARS-ID`, 역명, 자치구, 행정동,
+         `7시승차`, `7시하차`, `8시승차`, `8시하차`, X좌표, Y좌표) %>% 
+  gather(time, passenger, c(`7시승차`, `7시하차`, `8시승차`, `8시하차`)) %>% 
+  separate(time, c("time", "board"), 2) %>% 
+  mutate(time = parse_number(time),
+         passenger = as.numeric(passenger)) %>% 
+  arrange(`ARS-ID`)
+tidy_bus %>% head()
+
+# 행정동별 그룹화 ----
+H_bus <- bus %>% 
+group_by(자치구, 행정동) %>% 
+  summarise(bus_cnt = n_distinct(노선번호),
+            bus_station_cnt = n_distinct(`ARS-ID`),
+            bus_mean_7s = mean(`7시승차`),
+            bus_mean_7h = mean(`7시하차`),
+            bus_mean_8s = mean(`8시승차`),
+            bus_mean_8h = mean(`8시하차`))
+H_bus %>% head()
+
+```
+
+
+#### **2. 지하철 데이터**
+
+- **지하철 승하차 인원 정보 데이터**
+
+2020년 01~12월 교통카드 통계자료 : 티머니 교통카드 통계자료
+  https://www.t-money.co.kr/ncs/pct/ugd/ReadTrcrStstList.dev
+
+```{r warning=FALSE}
+# csv 파일이 월별로 존재하므로 for문으로 한번에 불러오기
+subway <- data.frame()
+for (i in 1:12){
+  file_name = paste0("data/2020년 ", sprintf("%02d",i), "월  교통카드 통계자료.csv")
+  subway <- rbind(subway, fread(file = file_name, header=TRUE)[-1])
+}
+
+# 변수명 변경 
+names(subway)[5:52] <- c("4시승차", "4시하차", "5시승차", "5시하차",
+                         "6시승차", "6시하차", "7시승차", "7시하차",
+                         "8시승차", "8시하차", "9시승차", "9시하차",
+                         "10시승차", "10시하차", "11시승차", "11시하차",
+                         "12시승차", "12시하차", "13시승차", "13시하차",
+                         "14시승차", "14시하차", "15시승차", "15시하차",
+                         "16시승차", "16시하차", "17시승차", "17시하차",
+                         "18시승차", "18시하차", "19시승차", "19시하차",
+                         "20시승차", "20시하차", "21시승차", "21시하차",
+                         "22시승차", "22시하차", "23시승차", "23시하차", 
+                         "00시승차", "00시하차", "01시승차", "01시하차",
+                         "02시승차", "02시하차", "03시승차", "03시하차")
+
+seoul_subway <- c("1호선", "2호선", "3호선", "4호선", "5호선", "6호선", 
+                  "7호선", "8호선", "9호선", "우이신설선")
+
+# 연월 분리 및 월 변수만 저장 
+# 1~9호선 + 우이신설선만 필터링
+# 출근시간대 07시~09시 승하차 인원 정보만 선택
+# 인원수 데이터에서 , 제거하고 수치형으로 변경 
+# 지하철 역이름 문자열에서 공백 제거 
+subway <- subway %>% 
+  separate(사용월,c(NA, "month"),"-") %>% 
+  filter(호선명 %in% seoul_subway) %>% 
+  select(month, 호선명,  지하철역,
+         `7시승차`, `7시하차`, `8시승차`, `8시하차`) %>% 
+  mutate_at(vars(contains("차")), parse_number) %>%
+  mutate(month = as.numeric(month),
+         지하철역 = str_trim(지하철역)) %>%
+  as.data.frame()
+```
+
+
+- **지하철역 위치정보 데이터**
+
+수도권 N호선 주소 데이터.csv : 철도데이터포털 파일데이터
+  https://data.kric.go.kr/rips/M_01_01/intro.do?keywords=%EC%A3%BC%EC%86%8C%EB%8D%B0%EC%9D%B4%ED%84%B0&lcd=A&mcd=
+
+```{r warning=FALSE}
+subway_address <- data.frame()
+for (i in 1:9){
+  file_name = paste0("data/수도권", i, "호선주소.csv")
+  subway_address <- rbind(subway_address, 
+                          fread(file = file_name, header=TRUE) %>%
+                            select(선명, 역명, 지번주소, 도로명주소))
+}
+# 우이신설역 추가 
+subway_address <- 
+  rbind(subway_address,
+        fread(file="data/우이신설주소.csv") %>% 
+          select(선명, 역명, 지번주소, 도로명주소)) %>% 
+  as.data.frame()
+
+# 서울시내 위치한 지하철역만 필터링
+# 필요없는 특수기호 삭제
+subway_address <- subway_address %>%
+  filter(str_detect(지번주소, "서울")) %>% 
+  mutate(지번주소 = str_remove_all(지번주소, "[?]"))
+
+# 주소 오류 보정
+# 도로명주소는 빈 셀이 존재하므로 지번주소 사용해서 검색
+# 지번주소 오류있는 경우 도로명주소로 대체
+subway_address[21,"지번주소"] <- "서울특별시 구로구 개봉동 415"     # 개보동->개봉동 수정
+subway_address[23,"지번주소"] <- "서울특별시 구로구 온수동 51-7"    # 특셜시->특별시 수정
+subway_address[27,"지번주소"] <- subway_address[27, "도로명주소"]   # 지번주소 존재X 
+subway_address[39,"지번주소"] <- subway_address[39, "도로명주소"]   # 지번주소 존재X
+subway_address[88,"지번주소"] <- subway_address[88, "도로명주소"]   # 지번주소 존재X
+subway_address[143,"지번주소"] <- subway_address[143, "도로명주소"] # 지번주소 존재X
+subway_address[157,"지번주소"] <- subway_address[157, "도로명주소"] # 지번주소 검색 오류
+subway_address[170,"지번주소"] <- subway_address[170, "도로명주소"] # 지번주소 존재X
+subway_address[194,"지번주소"] <- subway_address[194, "도로명주소"] # 지번주소 존재X
+subway_address[208,"지번주소"] <- subway_address[208, "도로명주소"] # 지번주소 검색 오류
+subway_address[221,"지번주소"] <- subway_address[221, "도로명주소"] # 지번주소 존재X
+subway_address[278,"지번주소"] <- subway_address[278, "도로명주소"] # 지번주소 존재X
+
+# 카카오 API 행정동 검색 ----
+# 주소검색 편의를 위해 - 뒤 문자열 삭제
+address_list <- subway_address$지번주소
+
+for(i in 1:nrow(subway_address)){
+  kpmg_res <- GET(
+    url = 'https://dapi.kakao.com/v2/local/search/address.json', 
+    query = list(query = address_list[i]),
+    add_headers(Authorization = paste0("KakaoAK ", KAKAO_MAP_API_KEY)))
+  
+  kpmg_list <- kpmg_res %>% content(as = 'text') %>% fromJSON()
+  
+  subway_address[i, "자치구"] <- kpmg_list$documents$address$region_2depth_name
+  subway_address[i, "행정동"] <- kpmg_list$documents$address$region_3depth_h_name
+  subway_address[i, "X좌표"] <- kpmg_list$documents$address$x
+  subway_address[i, "Y좌표"] <- kpmg_list$documents$address$y
+  #print(i)
+}
+
+# 주소 열 삭제, 열 이름 변경 및 중복 행 제거(수도권 5호선 주소데이터 csv파일 오류)
+# 지하철 역이름 공백 제거
+subway_address <- subway_address %>% 
+  select(-c(도로명주소, 지번주소)) %>% 
+  rename(호선명=선명, 지하철역 = 역명) %>%
+  mutate(지하철역 = str_trim(지하철역)) %>% unique()
+
+# 우이신설 -> 우이신설역으로 통일
+subway_address$호선명 <- plyr::revalue(subway_address$호선명,
+                                    replace=c("우이신설"="우이신설선"))
+```
+
+*철도포털에서 6호선 주소 데이터를 제공하지 않아서 구글 API 주소검색을 통해 6호선 지하철역 데이터를 보충하였습니다.*
+
+```{r message=FALSE, warning=FALSE}
+# 6호선 주소 데이터 보완----
+# Google API 좌표검색 ---
+station6_name = c('응암', ' 역촌', '불광', '독바위', '연신내', '구산', '응암', '새절', '증산', '디지털미디어시티', '월드컵경기장', '마포구청', '망원', '합정', '상수역', '광흥창', '대흥', '공덕', '효창공원앞', '삼각지', '녹사평', '이태원', '한강진역', '버티고개', '약수', '청구', '신당', '동묘앞', '창신', '보문', '안암','고려대','월곡', '상월곡', '돌곶이', '석계', '태릉입구','화랑대', '봉화산')
+station_list = str_c('6호선 ', station6_name)
+
+station_df = data.frame(station_list, stringsAsFactors = FALSE)
+station_df$station_list = enc2utf8(station_df$station_list) 
+station_lonlat = mutate_geocode(station_df, station_list) 
+
+# 카카오 API 행정동 검색 ---
+for(i in 1:nrow(station_lonlat)){
+  kpmg_res <- GET(
+    url = paste0('https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x=',
+                 station_lonlat[i,"lon"],'&y=', station_lonlat[i,"lat"]),
+    add_headers(Authorization = paste0("KakaoAK ", KAKAO_MAP_API_KEY)))
+  
+  kpmg_list <- kpmg_res %>% content(as = 'text') %>% fromJSON()
+  
+  
+  station_lonlat[i, "자치구"] <- kpmg_list$documents[2,]$region_2depth_name
+  station_lonlat[i, "행정동"] <- kpmg_list$documents[2,]$region_3depth_name
+  #print(i)
+}
+
+station_lonlat %<>% mutate(지하철역 = station6_name, 호선명 = "6호선") %>% 
+  select(호선명, 지하철역, 자치구, 행정동, lon, lat) %>% 
+  rename(X좌표 = lon, Y좌표=lat)
+
+# 6호선 데이터 병합 
+subway_address <- rbind(subway_address, station_lonlat)
+```
+
+
+```{r}
+#지하철 위치 정보 병합 ----
+# 지하철 역명 통일 위해 ()제거 및 보조역명 변수 새로 저장 
+# 공백 제거
+subway <- subway %>% 
+  separate(지하철역, c("지하철역", "보조역명"), sep="[(]") %>% 
+  mutate(
+    보조역명 = str_remove(보조역명, "[)]"),
+    지하철역 = str_trim(지하철역),
+    보조역명 = str_trim(보조역명))
+subway %>% head()
+
+subway_address <- subway_address %>% 
+  mutate(지하철역 = gsub("역", "", 지하철역)) %>% 
+  separate(지하철역, c("지하철역","보조역명"), sep="[(]") %>% 
+  mutate(
+    보조역명 = str_remove(보조역명, "[)]"),
+    지하철역 = str_trim(지하철역),
+    보조역명 = str_trim(보조역명))
+
+# 위치 데이터 병합---- 
+# 호선명 + 지하철역명 기준 병합
+# 결측치 제거 - 6호선 데이터 삭제 및 서울권 외 지하철 역 삭제 
+# 이외에 주소가 없는 역이 존재하나 주소 데이터 찾을 수 없으므로 삭제 (이부분 추후 보완 예정)
+subway <- 
+  left_join(subway, 
+            subway_address %>% select(-보조역명),
+            by = c("호선명", "지하철역")) %>% 
+  select(-보조역명) %>% drop_na()
+
+# tidy data ----
+tidy_subway <- subway %>% 
+  gather(time, passenger, c(`7시승차`, `7시하차`, `8시승차`, `8시하차`)) %>% 
+  separate(time, c("time", "board"), 2) %>% 
+  mutate(time = parse_number(time),
+         passenger = as.numeric(passenger)) %>% 
+  arrange(month)
+tidy_subway %>% head()
+
+# 행정동별 그룹화 ----
+H_subway <- subway %>% 
+  group_by(자치구, 행정동) %>% 
+  summarise(subway_cnt = n_distinct(지하철역),
+            subway_mean_7s = mean(`7시승차`),
+            subway_mean_7h = mean(`7시하차`),
+            subway_mean_8s = mean(`8시승차`),
+            subway_mean_8h = mean(`8시하차`))
+H_subway %>% head()
+```
+
+```{r include=FALSE}
+rm(kpmg_list, kpmg_res, address_list, file_name, seoul_gu, seoul_subway, station_list, station6_name, station_df, station_lonlat)
+```
+
+
+#### **3. 인구 데이터**
+
+- **서울 행정동 생활인구 데이터**
+
+행정동별 서울생활인구(내국인) : 서울 열린데이터 광장
+  http://data.seoul.go.kr/dataList/OA-14991/A/1/datasetView.do
+
+```{r message=FALSE, warning=FALSE}
+# csv 파일이 월별로 존재하므로 for문으로 한번에 불러오기
+population <- data.frame()
+for (i in 1:12){
+  file_name = paste0("data/LOCAL_PEOPLE_DONG_2020", sprintf("%02d",i), ".csv")
+  population <- rbind(population, 
+                      read_csv(file =file_name) %>% select(1:32))
+}
+population$기준일ID %>% n_distinct()    # 1년 
+population$시간대구분 %>% n_distinct()  # 24시간
+
+# 열이름 가독성있게 변경
+names(population) <- c("day", "time", "H_DNG_CD", "total_pop",
+                       # 남성 연령별 범주
+                       "M0-9", "M10-14", "M15-19", "M20-24", "M25-29",
+                       "M30-34", "M35-39", "M40-44", "M45-49", "M50-54",
+                       "M55-59", "M60-64", "M65-69", "M70-",
+                       # 여성 연령별 범주
+                       "F0-9", "F10-14", "F15-19", "F20-24", "F25-29",
+                       "F30-34", "F35-39", "F40-44", "F45-49", "F50-54",
+                       "F55-59", "F60-64", "F65-69", "F70-")
+
+
+# 성별 생산가능인구(15-64) 파생변수 생성 후 필요한 변수만 선택 
+population <- population %>%
+  mutate(M_working = `M15-19`+ `M20-24` + `M25-29` + `M30-34` +
+           `M35-39` + `M40-44`+ `M45-49`+ `M50-54`+ `M55-59` + `M60-64`,
+         F_working = `F15-19`+ `F20-24` + `F25-29` + `F30-34` +
+           `F35-39` + `F40-44`+ `F45-49`+ `F50-54`+ `F55-59` + `F60-64`,
+         working = M_working + F_working) %>% 
+  mutate(time = as.numeric(time)) %>% 
+  select(c(1:4, 33:35))
+
+# 시간대별 행정동 평균 생활인구 
+time_population <- population %>% 
+  group_by(H_DNG_CD, time) %>% 
+  summarise(mean_total = mean(total_pop),
+            mean_M_working = mean(M_working),
+            mean_F_working = mean(F_working),
+            mean_working = mean(working)) 
+time_population %>% head()
+
+# 행정동별 출근시간대 생활인구 (7시/8시 시간대 평균)
+H_population <- population %>% 
+  filter(time %in% c(7,8)) %>% 
+  group_by(H_DNG_CD) %>% 
+  summarise(mean_total_pop = mean(total_pop),
+            mean_working_pop = mean(working))
+H_population %>% head()
+
+# 출근시간대 요일별 생활인구
+wday_population <- population %>%
+  filter(time %in% c(7,8)) %>% 
+  mutate(day = ymd(day), 
+         wday = wday(day, label = TRUE)) %>% 
+  group_by(wday, H_DNG_CD) %>% 
+  summarise(mean_total = mean(total_pop),
+            mean_working = mean(working))
+wday_population %>% head()
+```
+
+- **사업체/종사자수 데이터**
+
+행정동별 서울생활인구(내국인) : 서울 열린데이터 광장
+  http://data.seoul.go.kr/dataList/OA-14991/A/1/datasetView.do
+
+```{r}
+# csv 파일이 월별로 존재하므로 for문으로 한번에 불러오기
+company <- read.csv("data/서울시 사업체현황 종사자수 통계.csv",
+                    header=TRUE, skip=1)
+
+# 합계/소계 행 제거
+# 행정동별 사업체수와 총 종사자수 변수만 선택
+# 수치 데이터에서 , 제거하고 수치형으로 변경
+H_company <- company %>%
+  filter(!(동 %in% c("소계", "합계"))) %>%
+  select(자치구, 동, 사업체수, 총종사자수) %>% 
+  mutate(사업체수 = parse_number(사업체수),
+             총종사자수 = parse_number(총종사자수)) %>% 
+  rename(행정동 = 동)
+H_company %>% head()
+```
+
+#### **4. 행정동별 데이터셋 형성**
+
+- **행정동 코드 데이터**
+
+행정구역 코드 정보 : 서울 열린데이터 광장
+  http://data.seoul.go.kr/dataVisual/seoul/seoulLivingPopulation.do
+
+```{r}
+H_code <- read.csv("data/행정동코드_매핑정보_20200325.csv", skip=1, header=TRUE)
+
+H_code %<>% 
+  dplyr::select(-DO_NM) %>% 
+  rename(자치구 = CT_NM, 행정동 = H_DNG_NM) 
+
+H_code %>% nrow() # 항동 제외
+
+# 행정동별 데이터 결합----
+H_data <- left_join(H_code, H_bus, by = c("자치구", "행정동"))
+H_data <- left_join(H_data, H_subway, by = c("자치구", "행정동"))
+H_data <- left_join(H_data, H_company, by = c("자치구", "행정동"))
+H_data <- left_join(H_data, H_population, by = "H_DNG_CD")
+
+# NA 0으로 채우기
+H_data <- mutate_all(H_data, ~replace(., is.na(.), 0))
+
+# 최종 행정동별 데이터셋 완성 -----
+H_data %>% head()
+```
+
+
+- **행정동 경계 shapefile 데이터**
+
+행정동 경계 shp 파일 : 국가공간정보포털 오픈마켓
+  http://data.nsdi.go.kr/dataset/20171206ds00001
+  
+```{r}
+# for map visualization
+suppressMessages(library(raster))
+suppressMessages(library(rgeos))
+suppressMessages(library(maptools))
+suppressMessages(library(rgdal))
+```
+
+```{r warning=FALSE}
+shp <- readOGR(dsn = 'data/Z_SOP_BND_ADM_DONG_PG.shp')
+proj4string(shp) <- CRS('+proj=tmerc +lat_0=38 +lon_0=127 +k=1 +x_0=200000 +y_0=500000 +ellps=bessel +units=m')
+to_crs = CRS('+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs')
+map = spTransform(shp, to_crs)
+map = fortify(map, region = "ADM_DR_CD")
+map <- map %>% filter(id <= 1125074)
+map %>% head()
+
+# 서울 행정동 지도 시각화
+ggplot() + geom_polygon(data = map, aes(x = long, y = lat, group = group),
+                        fill = 'white', colour = 'black')
+```
+
+
+### **3. 데이터 탐색(EDA)**
+
+전처리한 데이터셋을 통해 인사이트를 발굴하고자 시각화를 진행하였습니다.
+
+
+#### **다람쥐버스 현황 **
+
+먼저 현재 운영되고 있는 다람쥐버스의 정거장별 승하차 인원 분포를 확인했습니다. 
+
+- **다람쥐버스 정거장별 승하차 인원 분포**
+
+```{r, dpi=300}
+current <- c("8221","8441", "8552", "8761", "8771", "8551", "8331") # 다람쥐버스 현재 노선
+daramg <- tidy_bus %>% filter(노선번호  %in% current)
+
+
+# 8221번 버스
+daramg %>% 
+  filter(노선번호 == current[1]) %>% 
+  group_by(역명, time, board) %>% 
+  summarise(mean_passenger = mean(passenger)) %>% 
+  ggplot() + 
+  geom_col(aes(x=역명, y=mean_passenger, fill=board), position= "dodge") +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  theme_minimal() +
+  labs(title = "8221번 버스 승하차 현황",y= "월평균 승하차인원", fill = "") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text.x = element_text(angle = 30, hjust=1, size=8),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12), 
+        legend.position = "top") 
+
+
+# 8441 버스
+daramg %>% 
+  filter(노선번호 == current[2]) %>% 
+  group_by(역명, time, board) %>% 
+  summarise(mean_passenger = mean(passenger)) %>% 
+  ggplot() + 
+  geom_col(aes(x=역명, y=mean_passenger, fill=board), position= "dodge") +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  theme_minimal() +
+  labs(title = "8441번 버스 승하차 현황",y= "월평균 승하차인원", fill = "") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text.x = element_text(angle = 30, hjust=1, size=8),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12), 
+        legend.position = "top") 
+
+
+# 8552번 버스
+daramg %>% 
+  filter(노선번호 == current[3]) %>% 
+  group_by(역명, time, board) %>% 
+  summarise(mean_passenger = mean(passenger)) %>% 
+  ggplot() + 
+  geom_col(aes(x=역명, y=mean_passenger, fill=board), position= "dodge") +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  theme_minimal() +
+  labs(title = "8552번 버스 승하차 현황",y= "월평균 승하차인원", fill = "") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text.x = element_text(angle = 30, hjust=1, size=8),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12), 
+        legend.position = "top") 
+
+# 8761번 버스
+daramg %>% 
+  filter(노선번호 == current[4]) %>% 
+  group_by(역명, time, board) %>% 
+  summarise(mean_passenger = mean(passenger)) %>% 
+  ggplot() + 
+  geom_col(aes(x=역명, y=mean_passenger, fill=board), position= "dodge") +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  theme_minimal() +
+  labs(title = "8761번 버스 승하차 현황",y= "월평균 승하차인원", fill = "") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text.x = element_text(angle = 30, hjust=1, size=8),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12), 
+        legend.position = "top") 
+
+# 8771번 버스
+daramg %>% 
+  filter(노선번호 == current[5]) %>% 
+  group_by(역명, time, board) %>% 
+  summarise(mean_passenger = mean(passenger)) %>% 
+  ggplot() + 
+  geom_col(aes(x=역명, y=mean_passenger, fill=board), position= "dodge") +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  theme_minimal() +
+  labs(title = "8771번 버스 승하차 현황",y= "월평균 승하차인원", fill = "") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text.x = element_text(angle = 30, hjust=1, size=8),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12), 
+        legend.position = "top") 
+
+# 8551번 버스
+daramg %>% 
+  filter(노선번호 == current[6]) %>% 
+  group_by(역명, time, board) %>% 
+  summarise(mean_passenger = mean(passenger)) %>% 
+  ggplot() + 
+  geom_col(aes(x=역명, y=mean_passenger, fill=board), position= "dodge") +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  theme_minimal() +
+  labs(title = "8551번 버스 승하차 현황",y= "월평균 승하차인원", fill = "") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text.x = element_text(angle = 30, hjust=1, size=8),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12), 
+        legend.position = "top") 
+
+# 8331번 버스
+daramg %>% 
+  filter(노선번호 == current[7]) %>% 
+  group_by(역명, time, board) %>% 
+  summarise(mean_passenger = mean(passenger)) %>% 
+  ggplot() + 
+  geom_col(aes(x=역명, y=mean_passenger, fill=board), position= "dodge") +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  theme_minimal() +
+  labs(title = "8331번 버스 승하차 현황",y= "월평균 승하차인원", fill = "") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text.x = element_text(angle = 30, hjust=1, size=8),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12), 
+        legend.position = "top") 
+```
+
+대체적으로 지하철역 근처 정거장에서 하차가 집중되어있는 것을 확인할 수 있습니다. 이는 출근시간대 다람쥐버스의 주 목적인 **지하철과의 연계성**과 관련있는 것으로 보입니다. 따라서 향후 노선을 만들 때 지하철역과의 연계를 고려하고자 하였습니다. 
+
+
+- **현행 다람쥐버스 노선 시각화**
+
+```{r message=FALSE, warning=FALSE, dpi=200}
+# 지도에 좌표 표현 ----
+daramg_station <- daramg %>%
+  group_by(노선번호, 역명, board,X좌표, Y좌표) %>% 
+  summarise(mean = mean(passenger))
+
+qmap('Seoul', zoom = 11, source = 'stamen', maptype = "toner-lite") +
+  geom_point(data=daramg_station, 
+             aes(x=X좌표, y=Y좌표, color= 노선번호, size = mean)) +
+  scale_size_continuous(range = c(1, 3)) +
+  theme_minimal() +
+  labs(x="", y="", size = "평균 승하차승객")
+```
+
+
+#### **출근 시간대 버스 승하차 수요 시각화 **
+
+- **출근시간 월평균 승하차 평균 인원이 가장 많은 정거장 **
+
+```{r, dpi=200}
+# 승차
+p1 <- tidy_bus %>% 
+  filter(board=="승차") %>% 
+  group_by(역명, 자치구, 행정동) %>% 
+  summarise(mean_psg = mean(passenger)) %>% 
+  dplyr::select(역명, mean_psg, 자치구, 행정동) %>% 
+  arrange(desc(mean_psg)) %>% 
+  head(10) %>% 
+  ggplot(aes(x=reorder(역명,mean_psg), y=mean_psg)) +
+  geom_bar(color = "#72A293", fill = "#72A293", alpha = 0.6, stat="identity") +
+  labs(title = "출근시간대 최다 승차 인원 정거장 TOP10",
+       x = "정류소명", y = "월평균 승차 인원") +
+  coord_flip() +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"))
+
+# 하차
+p2 <- tidy_bus %>% 
+  filter(board=="하차") %>% 
+  group_by(역명, 자치구, 행정동) %>% 
+  summarise(mean_psg = mean(passenger)) %>% 
+  dplyr::select(역명, mean_psg, 자치구, 행정동) %>% 
+  arrange(desc(mean_psg)) %>% head(10) %>% 
+  ggplot(aes(x=reorder(역명,mean_psg), y=mean_psg)) +
+  geom_bar(color = "#72A293", fill = "#72A293", alpha = 0.6, stat="identity") +
+  labs(title = "출근시간대 최다 하차 인원 정거장 TOP10",
+       x = "정류소명", y = "월평균 하차 인원") +
+  coord_flip() +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"))
+
+grid.arrange(p1, p2, ncol=1)
+
+```
+
+```{r}
+# 행정동별 데이터와 지도 데이터 결합 
+H_map <- left_join(map, 
+                   H_data %>% mutate(id = as.character(H_SDNG_CD)),
+                   by = "id")
+```
+
+- **출근시간대 행정동별 버스 승하차인원 지도 시각화**
+
+```{r, dpi=200}
+# 그래프 간 비교 위해 gradient 범위 통일 
+bus_7s_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = bus_mean_7s), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#EA2C62', limits=c(0,1610)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 7시 버스 승차 인원", fill = "인원 수")
+
+bus_7h_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = bus_mean_7h), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#EA2C62', limits=c(0,1610)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 7시 버스 하차 인원", fill = "인원 수")
+
+bus_8s_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = bus_mean_8s), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#EA2C62', limits=c(0,1610)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 8시 버스 승차 인원", fill = "인원 수")
+
+bus_8h_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = bus_mean_8h), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#EA2C62', limits=c(0,1610)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 8시 버스 하차 인원", fill = "인원 수")
+
+ggarrange(bus_7s_plot, bus_7h_plot, bus_8s_plot, bus_8h_plot,
+          common.legend = TRUE, legend = "right")
+```
+
+#### **출근 시간대 지하철 승하차 수요 시각화 **
+
+- **출근시간대 행정동별 지하철 승하차인원 지도 시각화**
+
+```{r, dpi=200}
+# 그래프 간 비교 위해 gradient 범위 통일 
+subway_7s_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = subway_mean_7s), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#4641D9', limits=c(0, 3e+05)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 7시 지하철 승차 인원", fill = "인원 수")
+
+subway_7h_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = subway_mean_7h), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#4641D9', limits=c(0, 3e+05)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 7시 지하철 하차 인원", fill = "인원 수")
+
+subway_8s_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = subway_mean_8s), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#4641D9', limits=c(0, 3e+05)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 8시 지하철 승차 인원", fill = "인원 수")
+
+subway_8h_plot <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = subway_mean_8h), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#4641D9', limits=c(0, 3e+05)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "월평균 8시 지하철 하차 인원", fill = "인원 수")
+
+ggarrange(subway_7s_plot, subway_7h_plot, subway_8s_plot, subway_8h_plot,
+          common.legend = TRUE, legend = "right")
+```
+
+#### **출근 시간대 생활인구 시각화**
+
+- **시간대별 행정동별 생활인구**
+```{r, dpi=200}
+time_population <- left_join(time_population, H_code, by = "H_DNG_CD") 
+
+# 구별 시간대별 생산가능인구 추이 
+time_population %>% 
+  group_by(time, 자치구) %>% 
+  summarise(working = sum(mean_working)) %>% 
+  ggplot(aes(x=time, y=working, color = 자치구, group=자치구)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~자치구) +
+  labs(title = "구별 시간대별 생산가능인구 추이", x="시간", y='월평균 시간대별  총 생산가능인구') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        strip.background = element_rect(fill = "lightgrey", color=NA),
+        panel.border = element_rect(colour = NA, fill = NA))
+```
+
+- `강남구`, `서초구`, `영등포구`, `중구`, `종로구` 등이 낮 시간 인구가 증가하는 양상을 보이는 반면, 
+- `강동구`, `강북구`, `관악구`, `광진구`, `노원구`, `동작구`, `성북구`, `양천구`, `은평구`, `중랑구` 등은 낮 시간동안 인구가 더 적어지는 것을 확인할 수 있습니다. 
+- `구로구`, `동대문구`, `서대문구`, `성동구`, `송파구` 등은 시간대별 생활인구에 큰 변화가 없어 보입니다.
+
+```{r, dpi=200}
+time_population %<>%
+  rename(id = H_SDNG_CD) %>% 
+  mutate(id = as.character(id))
+
+# 0시생활인구 -----
+pop_map_0 <- left_join(map, time_population %>% filter(time == 0), by = "id")
+am12 <- ggplot() + 
+  geom_polygon(data = pop_map_0,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "AM 12시 행정동별 생활인구 수", fill = "")
+
+# 3시생활인구 -----
+pop_map_3 <- left_join(map, time_population %>% filter(time == 3), by = "id")
+am03 <- ggplot() + 
+  geom_polygon(data = pop_map_3,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "AM 03시 행정동별 생활인구 수", fill = "")
+
+# 6시생활인구 -----
+pop_map_6 <- left_join(map, time_population %>% filter(time == 6), by = "id")
+am06 <- ggplot() + 
+  geom_polygon(data = pop_map_6,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "AM 06시 행정동별 생활인구 수", fill = "")
+
+# 9시생활인구 -----
+pop_map_9 <- left_join(map, time_population %>% filter(time == 9), by = "id")
+am09 <- ggplot() + 
+  geom_polygon(data = pop_map_9,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "AM 09시 행정동별 생활인구 수", fill = "")
+
+# 12시생활인구 -----
+pop_map_12 <- left_join(map, time_population %>% filter(time == 12), by = "id")
+pm12 <- ggplot() + 
+  geom_polygon(data = pop_map_12,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "PM 12시 행정동별 생활인구 수", fill = "")
+
+# 15시생활인구 -----
+pop_map_15 <- left_join(map, time_population %>% filter(time == 15), by = "id")
+pm15 <- ggplot() + 
+  geom_polygon(data = pop_map_15,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "PM 15시 행정동별 생활인구 수", fill = "")
+
+
+# 18시생활인구 -----
+pop_map_18 <- left_join(map, time_population %>% filter(time == 18), by = "id")
+pm18 <- ggplot() + 
+  geom_polygon(data = pop_map_18,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "PM 18시 행정동별 생활인구 수", fill = "")
+
+# 21시생활인구 -----
+pop_map_21 <- left_join(map, time_population %>% filter(time == 21), by = "id")
+pm21 <- ggplot() + 
+  geom_polygon(data = pop_map_21,
+               aes(x = long, y = lat, group = id, fill = mean_total), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#8041D9', limits=c(0, 120000)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=10, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(title = "PM 21시 행정동별 생활인구 수", fill = "")
+
+ggarrange(am03, am06, am09, pm12, pm15,pm18, pm21, am12, ncol=4, nrow=2,
+             common.legend = TRUE, legend="right")
+```
+
+#### **출근 시간대 사업체 및 종사자 밀집 지역 시각화** 
+
+- **행정동별 사업체 및 종사자 수 ** 
+```{r, dpi=200}
+# 행정동별 사업체 수 시각화 
+b1 <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = 사업체수), color = "darkgrey") +
+  scale_fill_gradient(low = 'white', high = '#001A7F') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(.2, .8)) +
+  labs(title = "행정동별 사업체 수", fill = "")
+
+# 행정동별 종사자 수 시각화 
+b2 <- ggplot() + 
+  geom_polygon(data = H_map, 
+               aes(x = long, y = lat, group = id, fill = 총종사자수), color = "grey") +
+  scale_fill_gradient(low = 'white', high = '#001A7F') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(.2, .8)) +
+  labs(title = "행정동별 총 종사자 수", fill = "")
+
+grid.arrange(b1,b2, ncol=2)
+```
+- 대체적으로 강남구와 중구, 종로구에 사업체와 종사자가 많은 것으로 나타나며, 
+- `강남구 역삼1동` 과 `금천구 가산동`이 유독 높은 종사자 수를 보이는 행정동으로 보입니다.
+
+
+#### **승하차 상위 정거장 및 지하철역 지도 시각화**
+
+승하차 인원이 가장 높은 정거장 20곳과 지하철역 10곳을 지도에 좌표로 표현했습니다.
+
+```{r, dpi=200}
+# 승차 상위 정거장 & 역 시각화
+
+bus_s <- tidy_bus %>% 
+  filter(board=="승차") %>% 
+  group_by(역명, X좌표, Y좌표) %>% 
+  summarise(mean_pass = mean(passenger)) %>%
+  arrange(desc(mean_pass)) %>% 
+  head(20) %>% 
+  mutate(group = "버스 승차 TOP 20")
+
+subway_s <- tidy_subway %>%
+  filter(board=="승차") %>% 
+  group_by(지하철역, X좌표, Y좌표) %>% 
+  summarise(mean_pass = mean(passenger)) %>% 
+  mutate_at(vars(-지하철역), as.numeric) %>%
+  arrange(desc(mean_pass)) %>% 
+  head(10) %>% 
+  mutate(group="지하철 승차 TOP 10") %>% 
+  rename(역명=지하철역)
+
+b2 + geom_point(data =  rbind(bus_s, subway_s),
+             aes(x=X좌표, y=Y좌표, color=group, shape=group), size=3) +
+  geom_text_repel(data =  rbind(bus_s, subway_s),
+                  aes(x=X좌표, y=Y좌표,label = 역명, color=group), 
+                  size=2.5, max.overlaps=Inf) +
+  scale_color_manual(values = c("#003E00","#CC3D3D")) +
+  labs(title = "승차인원이 가장 많은 지하철역 & 정거장",
+       fill="종사자 수", color="", shape="")+
+  theme(legend.position = "left",
+        legend.key.height = unit(1, "cm"))
+
+# 하차 상위 정거장 & 역 시각화
+
+bus_h <- tidy_bus %>% 
+  filter(board=="하차") %>% 
+  group_by(역명, X좌표, Y좌표) %>% 
+  summarise(mean_pass = mean(passenger)) %>%
+  arrange(desc(mean_pass)) %>% 
+  head(20) %>% 
+  mutate(group = "버스 하차 TOP 20")
+
+subway_h <- tidy_subway %>%
+  filter(board=="하차") %>% 
+  group_by(지하철역, X좌표, Y좌표) %>% 
+  summarise(mean_pass = mean(passenger)) %>% 
+  mutate_at(vars(-지하철역), as.numeric) %>%
+  arrange(desc(mean_pass)) %>% 
+  head(10) %>% 
+  mutate(group="지하철 하차 TOP 10") %>% 
+  rename(역명=지하철역)
+
+b2 + geom_point(data =  rbind(bus_h, subway_h),
+                aes(x=X좌표, y=Y좌표, color=group, shape=group), size=3) +
+  geom_text_repel(data =  rbind(bus_h, subway_h),
+                  aes(x=X좌표, y=Y좌표,label = 역명, color=group), 
+                  size=2.5, max.overlaps=Inf) +
+  scale_color_manual(values = c("#003E00","#CC3D3D")) +
+  labs(title = "하차인원이 가장 많은 지하철역 & 정거장",
+       fill="종사자 수", color="", shape="")+
+  theme(legend.position = "left",
+        legend.key.height = unit(1, "cm"))
+```
+
+- 대체적으로 지하철 승차인원이 높은 역은 쌍문, 수유, 연신내, 화곡 등 종사자 수가 적은 지역에서 나타나는 반면, 지하철 하차인원이 높은 역은 을지로입구, 종각, 광화문, 강남, 삼성, 선릉, 가산디지털단지 등 종사자 수가 높은 곳에 매우 밀집되어 있음을 확인할 수 있었습니다.
+- 반면 버스 승하차 상위 정거장의 경우 종사자 수와 무관하게 나타났으며, 승차는 서울의 남서쪽, 하차는 서울의 동북쪽에서 인원수 상위 정거장들이 존재하는 것으로 보입니다.
+
+
+```{r, dpi=200}
+# 버스 하차 & 지하철 승차
+ggplot() + 
+  geom_polygon(data = map, aes(x = long, y = lat, group = group),
+               fill = '#FFFFF6', colour = "grey", alpha=.4) +
+  geom_point(data =  rbind(bus_h, subway_s),
+                aes(x=X좌표, y=Y좌표, color=group, shape=group), size=3) +
+  geom_text_repel(data =  rbind(bus_h, subway_s),
+                  aes(x=X좌표, y=Y좌표,label = 역명, color=group), 
+                  size=2.5, max.overlaps=Inf) +
+  scale_color_manual(values = c("#003E00","#CC3D3D")) +
+  labs(title = "하차인원이 가장 많은 지하철역 & 승차인원이 가장 많은 정거장",
+       fill="종사자 수", color="", shape="")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=20, color="darkgrey"),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        legend.position = c(.15, .9),
+        legend.key.height = unit(1, "cm"))
+```
+- 버스 하차인원 상위 20곳 정거장과 지하철 승차인원 상위 10곳 역을 동시에 좌표로 표시한 결과, 
+버스 하차 인원이 많은 곳과 지하철 승차 인원이 많은 곳이 상당 부분 겹치는 것을 발견할 수 있었습니다. 이는 버스에서 하차하여 지하철을 타고 출근하는 인구의 영향이라고 해석할 수 있을 것 같습니다. 
+
+#### **상관분석 **
+```{r}
+suppressMessages(library(corrplot))
+```
+
+행정동별 데이터셋의 상관플랏을 그려서 변수 간 상관관계를 확인하였습니다.
+
+```{r}
+## 상관분석 ##
+H_cor <- cor(H_data %>% dplyr::select(5:19))
+corrplot(round(H_cor,2), method="number", diag=FALSE, tl.col = "black")
+
+# 7-8시 상관관계 너무 높음
+H_data %<>% 
+  mutate(bus_mean_s = (bus_mean_7s+bus_mean_8s)/2,
+         bus_mean_h = (bus_mean_7h+bus_mean_8h)/2,
+         subway_mean_s = (subway_mean_7s+subway_mean_8s)/2,
+         subway_mean_h = (subway_mean_7h+subway_mean_8h)/2) %>% 
+  dplyr::select(-c(bus_mean_7s, bus_mean_7h, bus_mean_8s, bus_mean_8h,
+            subway_mean_7s, subway_mean_7h, subway_mean_8s, subway_mean_8h, mean_working_pop))
+
+H_cor <- cor(H_data %>% dplyr::select(5:14))
+corrplot(round(H_cor,2), method="number", diag=FALSE, tl.col = "black")
+```
+
+- 상관플랏을 보면 지하철의 7시와 8시의 승하차 인원수, 생산가능인구와 총생활인구, 버스의 7시와 8시 승하차 인원수는 매우 높은 양의 상관관계인 것을 확인 할 수 있습니다. 이에 7시와 8시로 시간을 나누지 않고 변수를 하나로 통합하고자 하였습니다. 
+
+- 버스의 출근시간대 하차 수보다는 지하철의 출근시간대 하차 인원 수가 총종사자수/사업체수와 더 큰 상관관계를 갖고 있습니다.
+
+### **4. 행정동 선정과 버스 노선 제안**
+
+> 흐름 요약 :
+> 행정동별 데이터를 통해 버스의 승하차인원을 종속변수로 하는 회귀모형을 적합한 뒤, 영향을 미치는 유의한       > 변수들을 파악할 것입니다. 이후 유의한 변수들의 방향을 기준으로 행정동을 필터링 한 뒤, 선정된 행정동 내 버스 > 정거장을 클러스터링을 통해 승하차 수요가 높은 군집을 선택하여 다익스트라 알고리즘으로 연결할 예정입니다. 
+
+#### **회귀분석: 유의한 변수 탐색**
+
+```{r}
+suppressMessages(library(car))
+suppressMessages(library(QuantPsyc))
+```
+
+
+회귀모형 적합 전 종속변수의 분포를 확인한 결과, 정규성 조건을 위해 변환이 필요하다고 판단하여 제곱근 변환을 해주었습니다. 
+```{r}
+par(mfrow=c(2,3))
+
+hist(H_data$bus_mean_s,breaks=30)
+hist(log(H_data$bus_mean_s+1),breaks=30)
+hist(sqrt(H_data$bus_mean_s),breaks=30)
+
+hist(H_data$bus_mean_h,breaks=30)
+hist(log(H_data$bus_mean_h+1),breaks=30)
+hist(sqrt(H_data$bus_mean_h),breaks=30)
+
+par(mfrow=c(1,2))
+boxplot(sqrt(H_data$bus_mean_s)); title("변환 후 버스승차인원평균 Boxplot")
+boxplot(sqrt(H_data$bus_mean_h)); title("변환 후 버스하차인원평균 Boxplot")
+
+```
+
+각각 승차인원과 하차인원을 종속변수로 회귀모형을 적합한 뒤 stepwise방법으로 변수선택 과정을 거쳤습니다. 변수별 계수 비교를 위해 표준화 회귀계수를 사용하였습니다. 
+
+```{r}
+# 승차인원 ~ 
+reg.model_s <- lm(sqrt(bus_mean_s) ~ ., data = H_data %>% dplyr::select(5:14))
+summary(reg.model_s)
+par(mfrow=c(2,2))
+plot(reg.model_s)
+
+vif(reg.model_s) # 다중공선성 문제 발생 X
+step.s <- step(reg.model_s, direction = "both")
+summary(step.s)
+
+lm.beta(step.s) # 버스승차 수 = -0.16*버스노선수 - 0.23*지하철역수 + 0.31*버스하차인원수
+
+# 하차인원 ~ 
+reg.model_h <- lm(sqrt(bus_mean_h) ~ ., data = H_data %>% dplyr::select(5:14))
+summary(reg.model_h)
+par(mfrow=c(2,2))
+plot(reg.model_h)
+
+vif(reg.model_s) # 다중공선성 문제 발생 X
+step.h <- step(reg.model_h, direction = "both")
+summary(step.h)
+
+lm.beta(step.h) #  버스 하차인원 수 = 0.24*버스노선수 - 0.22*버스정거장수 + 0.22*총종사자수 + 0.16*총인구수 + 0.26*버스승차인원수 + 0.18*지하철역승차인원수 
+
+```
+
+회귀분석 결과 유의미한 영향을 미치는 변수들을 통해 행정동을 필터링하였습니다. 
+
+```{r}
+# 승차 수요 높은 행정동 필터링
+candidate_s <- H_data %>% 
+  filter(bus_cnt <= mean(bus_cnt), 
+         subway_cnt <= mean(subway_cnt),
+         bus_mean_h >= median(bus_mean_h)) %>% 
+  mutate(group = "s")
+
+# 하차 수요 높은 행정동 필터링 
+candidate_h <- H_data %>% 
+  filter(bus_cnt >= median(bus_cnt),
+         bus_station_cnt <= mean(bus_station_cnt),
+         총종사자수 >= median(총종사자수),
+         mean_total_pop >= median(mean_total_pop),
+         bus_mean_s >= median(bus_mean_s),
+         subway_mean_s>= median(subway_mean_s)) %>% 
+  mutate(group = "h")
+
+candidate = rbind(candidate_s, candidate_h)
+
+intersect(candidate_s$자치구, candidate_h$자치구)
+intersect(candidate_s$행정동, candidate_h$행정동)
+```
+
+다음과 같이 `은평구`, `마포구`, `관악구`, `서초구`, `강남구`, `송파구` 내의 행정동이 후보로 선정되었습니다. 
+
+> **8221** : 장안2동 주민센터-답십리역 (동대문구)
+> **8441** : 은곡마을 - 수서역 (강남구)
+> **8552** : 신림복지관 - 신림역 (관악구)
+> **8761** : 신촌로터리 - 국회의사당 (서대문구-영등포구)
+> **8771** : 구산중 - 녹번역 (은평구)
+> **8551** : 봉천역 - 노량진역 (관악구-동작구)
+> **8331** : 마천사거리 - 잠실역 (송파구)
+
+그러나 서초구를 제외한 모든 후보 자치구에서 실제로 다람쥐버스가 운영되고 있었기 때문에 지도로 시각화하여 확인한 뒤 겹치지 않게 하는 방향으로 신규 노선을 설정하였습니다. 
+
+```{r}
+candidate %>% filter(자치구 == "은평구") %>% dplyr::select(행정동, group)
+candidate %>% filter(자치구 == "마포구") %>% dplyr::select(행정동, group) 
+candidate %>% filter(자치구 == "관악구") %>% dplyr::select(행정동, group)
+candidate %>% filter(자치구 == "서초구") %>% dplyr::select(행정동, group)
+candidate %>% filter(자치구 == "강남구") %>% dplyr::select(행정동, group)
+candidate %>% filter(자치구 == "송파구") %>% dplyr::select(행정동, group)
+```
+
+#### **클러스터링 : 승하차 수요 정거장 탐색**
+```{r}
+suppressMessages(library(factoextra))
+suppressMessages(library(cluster))
+```
+
+```{r}
+# 버스 정거장 
+station_list <- bus %>% 
+  group_by(`ARS-ID`, 역명, X좌표, Y좌표, 자치구, 행정동) %>% 
+  summarise(mean_s = mean(`7시승차` + `8시승차`),
+            mean_h = mean(`7시하차` + `8시하차`))
+station_list <- left_join(station_list, H_code, by = c("자치구", "행정동"))
+```
+후보 행정동의 버스정거장을 클러스터링하여 승차수요와 하차수요가 가장 높게 나온 정거장들을 연결하는 방식으로 진행하였습니다. 또한 기존 현행 다람쥐버스들은 소수의 정거장에 하차 인원이 집중되고 있기 때문에 승차 수요가 높은 정거장들을 지하철역 근처 정거장과의 연결하는 것을 목표로 하였습니다. 
+
+
+1. 은평구 
+
+```{r}
+# 1. 은평구----
+ep <- station_list %>% 
+  filter(행정동 %in% c("응암1동", "불광2동"))
+
+cluster_1 = ep[,c("mean_s", "mean_h")]
+cluster_1 = scale(cluster_1) %>% as_tibble()
+
+# 클러스터 개수 찾기
+fviz_nbclust(x = cluster_1, FUNcluster = cluster::pam, method='wss') 
+fviz_nbclust(x = cluster_1, FUNcluster = cluster::pam, method = "silhouette")
+
+pam <- pam(cluster_1, 3)
+pam$silinfo$avg.width # 0.59
+fviz_cluster(pam)
+
+ep <- cbind(as.factor(pam$clustering), ep) %>% rename(cluster = "...1")
+
+c1 <- ggplot(ep, aes(x=cluster, y=mean_s, fill = cluster)) + 
+  geom_boxplot() + theme_classic() + 
+  labs(y="평균 승차인원")+
+  scale_fill_brewer(palette = "Pastel1")
+c2 <- ggplot(ep, aes(x=cluster, y=mean_h, fill = cluster)) + 
+  geom_boxplot() + theme_classic() +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  labs(y="평균 하차인원")
+
+ggarrange(c1,c2, nrow=1, common.legend = TRUE, legend = "top")
+
+ep %>% filter(cluster==2)  #승차수요! 
+ep %>% filter(cluster==3)  #하차수요!
+
+ggplot() + 
+  geom_polygon(data = map %>% 
+                 filter(id %in% c(1112059, 1112057,1112065, 1112072,
+                                  1112072, 1112058, 1112051, 1112052, 1112074)),
+               aes(x = long, y = lat, group = group),
+               fill = '#F8F3E4', colour = '#735C4F') +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  geom_point(data = daramg_station %>% filter(노선번호 == 8771),
+             aes(x=X좌표, y=Y좌표, color = 노선번호), size = 4) +
+  geom_point(data = ep %>% filter(cluster %in% c(2,3)),
+             aes(x = X좌표, y = Y좌표, col = factor(cluster)), cex = 3) +
+  geom_text_repel(data = ep %>% filter(cluster %in% c(2,3)),
+                  aes(x= X좌표, y = Y좌표, label = 역명),size = 3) +
+  scale_color_discrete(name = "버스 정거장",
+                      labels = c("승차수요 후보", "하차수요 후보", "8771번 노선")) +
+  theme(legend.title = element_text(face = "bold"))
+
+# 기존 노선과 겹치지 않게 하도록 불광2동쪽 노선만 연결하고자 함
+new_station_list <- c("연서시장", "불광지구대", "금강골드", "연신초등학교", 
+                      "북한산대창센시티아파트", "불광중학교", "목욕탕앞")
+
+route1 <- ep %>% filter(역명 %in% new_station_list)
+```
+
+- 은평구 응암1동과 불광2동의 버스정류장 중 승차수요와 하차수요가 높은 클러스터의 정거장들을 지도에 시각화한 것입니다. 응암1동 정거장의 경우 실제 운영되고 있는 8771 버스의 노선과 거의 겹치는 것으로 나타났습니다. 신규 노선을 제안하는 것이 목표였기 때문에 겹치지 않는 불광2동의 정거장만을 연결하여 노선을 설정하였습니다.
+
+- 은평구 이후로는 실제 다람쥐버스가 운영되고 있는 것을 감안하여 현재 다람쥐버스가 운영되고 있지 않은 구에서만 노선을 제안하고자 하였습니다.
+
+2. 서초구
+
+```{r}
+sc <- station_list %>% 
+  filter(행정동 %in% c("방배1동", "방배본동"))
+
+cluster_2 = sc[,c("mean_s", "mean_h")]
+cluster_2 = scale(cluster_2) %>% as_tibble()
+
+# 클러스터 개수 찾기
+fviz_nbclust(x = cluster_2, FUNcluster = cluster::pam, method='wss') 
+fviz_nbclust(x = cluster_2, FUNcluster = cluster::pam, method = "silhouette")
+
+pam <- pam(cluster_2, 5)
+pam$silinfo$avg.width # 0.45
+fviz_cluster(pam)
+
+sc <- cbind(as.factor(pam$clustering), sc) %>% rename(cluster="...1")
+
+d1 <- ggplot(sc, aes(x=cluster, y=mean_s, fill = cluster)) + 
+  geom_boxplot() + theme_classic() + 
+  labs(y="평균 승차인원")+
+  scale_fill_brewer(palette = "Pastel1")
+d2 <- ggplot(sc, aes(x=cluster, y=mean_h, fill = cluster)) + 
+  geom_boxplot() + theme_classic() +
+  scale_fill_brewer(palette = "Pastel1")+ 
+  labs(y="평균 하차인원")
+ggarrange(d1,d2, nrow=1, common.legend = TRUE, legend = "top")
+
+sc %>% filter(cluster==5)  # 승차 수요! (하차 수요도 높음)
+sc %>% filter(cluster==1)  # 하차 수요
+
+
+ggplot() + 
+  geom_polygon(data = map %>% 
+                 filter(id %in% c(1122061,1122062,1122065)),
+               aes(x = long, y = lat, group = group),
+               fill = '#F8F3E4', colour = '#735C4F') +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  geom_point(data = sc %>% filter(cluster %in% c(1,5)),
+             aes(x = X좌표, y = Y좌표, col = factor(cluster)), cex = 3) +
+  geom_text_repel(data = sc %>% filter(cluster %in% c(1,5)),
+                  aes(x= X좌표, y = Y좌표, label = 역명),size = 3) +
+  scale_color_discrete(name = "버스 정거장",
+                       labels = c("승차수요 후보", "하차수요 후보")) +
+  theme(legend.title = element_text(face = "bold"),
+        legend.position = c(.1, .2))
+
+route2 <- sc %>% filter(cluster %in% c(3,4))
+```
+
+- 승하차 수요가 모두 높았던 서초구의 방배본동과 승차 수요가 높으며 방배본동과 가까웠던 방배1동의 버스 정거장을 클러스터링하여 승하차 수요가 높은 정거장들을 추출하였습니다. 
+
+
+#### **최소신장나무 알고리즘 : 버스 노선 제안**
+
+선정된 두 버스 노선 정거장을 최소신장나무 알고리즘을 통해 하나의 노선으로 연결하였습니다. 최소신장나무 알고리즘은 노드 간의 거리를 계산하여 최소거리로 연결할 수 있는 알고리즘입니다. 
+
+최소신장나무 알고리즘으로 노선을 연결하는 부분은 https://statkclee.github.io/r-algorithm/r-minimal-spanning-tree.html 를 참고하였습니다. 
+
+
+```{r}
+suppressMessages(library(igraph))
+suppressMessages(library(Imap))
+```
+
+
+1. 은평구
+```{r message=FALSE, warning=FALSE}
+# 위경도에서 거리정보 계산
+map_dist_df <- route1
+map_dist_list <- list()
+
+for (i in 1:nrow(map_dist_df)) {
+  
+  map_dist_list[[i]] <- gdist(lon.1 = map_dist_df$X좌표[i], 
+                              lat.1 = map_dist_df$Y좌표[i], 
+                              lon.2 = map_dist_df$X좌표, 
+                              lat.2 = map_dist_df$Y좌표)
+}
+
+map_dist_mat <- sapply(map_dist_list, unlist)
+colnames(map_dist_mat) <- map_dist_df$역명
+rownames(map_dist_mat) <- map_dist_df$역명
+
+map_mst <- ape::mst(map_dist_mat)
+plot(map_dist_df$X좌표, map_dist_df$Y좌표, xlab = "", ylab = "", asp=1,
+     yaxt='n', xaxt='n', ann=FALSE, col=2)
+
+for (i in 1:nrow(map_dist_mat)) {
+  w1 <- which(map_mst[i, ] == 1)
+  segments(map_dist_df$X좌표[i], map_dist_df$Y좌표[i], map_dist_df$X좌표[w1], map_dist_df$Y좌표[w1])
+}
+```
+
+```{r}
+map_dist_mat[lower.tri(map_dist_mat)] <- 0
+map_dist_g <- graph.adjacency(map_dist_mat, weighted=TRUE)
+map_dist_df <- get.data.frame(map_dist_g)
+DT::datatable(map_dist_df)
+
+# 네트워크 최소신장 시각화 
+plot(map_dist_g, edge.arrow.size=.1, edge.curved=.1,
+     vertex.size=5, vertex.color="orange")
+
+# 최소신장나무 알고리즘
+map_dist_mst_g <- mst(map_dist_g)
+
+# 정적 시각화
+V(map_dist_mst_g)$label.cex <- 0.6
+
+plot(map_dist_mst_g, edge.arrow.size=.1, edge.curved=.1,
+     edge.label.font=0.6, vertex.size=3, vertex.color="pink", asp=0)
+```
+
+2. 서초구
+```{r message=FALSE, warning=FALSE}
+# 위경도에서 거리정보 계산
+map_dist_df <- route2
+map_dist_list <- list()
+
+for (i in 1:nrow(map_dist_df)) {
+  
+  map_dist_list[[i]] <- gdist(lon.1 = map_dist_df$X좌표[i], 
+                              lat.1 = map_dist_df$Y좌표[i], 
+                              lon.2 = map_dist_df$X좌표, 
+                              lat.2 = map_dist_df$Y좌표)
+}
+
+map_dist_mat <- sapply(map_dist_list, unlist)
+colnames(map_dist_mat) <- map_dist_df$역명
+rownames(map_dist_mat) <- map_dist_df$역명
+
+map_mst <- ape::mst(map_dist_mat)
+plot(map_dist_df$X좌표, map_dist_df$Y좌표, xlab = "", ylab = "", asp=1,
+     yaxt='n', xaxt='n', ann=FALSE, col=2)
+
+for (i in 1:nrow(map_dist_mat)) {
+  w1 <- which(map_mst[i, ] == 1)
+  segments(map_dist_df$X좌표[i], map_dist_df$Y좌표[i], map_dist_df$X좌표[w1], map_dist_df$Y좌표[w1])
+}
+```
+
+```{r}
+map_dist_mat[lower.tri(map_dist_mat)] <- 0
+map_dist_g <- graph.adjacency(map_dist_mat, weighted=TRUE)
+map_dist_df <- get.data.frame(map_dist_g)
+DT::datatable(map_dist_df)
+
+# 네트워크 최소신장 시각화 
+plot(map_dist_g, edge.arrow.size=.1, edge.curved=.1,
+     vertex.size=5, vertex.color="orange")
+
+# 최소신장나무 알고리즘
+map_dist_mst_g <- mst(map_dist_g)
+
+# 정적 시각화
+V(map_dist_mst_g)$label.cex <- 0.6
+
+set.seed(2)
+plot(map_dist_mst_g, edge.arrow.size=.1, edge.curved=.1,
+     edge.label.font=0.6, vertex.size=3, vertex.color="pink", asp=0)
+```
+
+
+### 5. 결론 
+
+#### **최종 노선 선정**
+
+최종적으로 선정된 은평구와 서초구 노선은 다음과 같습니다.
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, dpi=300}
+# 은평구 노선
+route1 %>% dplyr::select(역명, `ARS-ID`, X좌표, Y좌표)
+
+# 서초구 노선
+route2 %>% dplyr::select(역명, `ARS-ID`, X좌표, Y좌표)
+
+
+# 최종 노선 시각화 
+final_route <- rbind(route1, route2)
+
+qmap('Seoul', zoom = 12, maptype = "toner-lite") +
+  geom_point(data=final_route, aes(x=X좌표, y=Y좌표, color =자치구)) + 
+  theme_minimal() +
+  labs(x="", y="")
+```
+
+#### **한계와 의의 **
+
+
+- 한계
+  - 버스 노선을 선정하는데 인구와 교통편 데이터 외 더 다양한 변수들을 고려하지 못함
+  - 실제 도로의 상황이나 특성 등을 고려하지 않고 노선 제안 
+  - 신규 노선의 효과를 검증할 명확한 방법의 부재
+  
+- 의의
+  - 카카오 API와 구글 API의 주소검색과 지도 시각화를 적극 활용
+  - 다양한 시각화를 통한 인사이트 발굴을 위해 노력
+  - 회귀분석, 클러스터링 등 다양한 모델링 방법 사용
+  - 정책 제안적인 주제로 공익적인 목적 존재
+  
